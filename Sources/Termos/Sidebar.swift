@@ -102,7 +102,7 @@ private struct WorkspaceRow: View {
             .onHover { hover = $0 }
             .onTapGesture(count: 2) { app.rename(ws) }
             .onTapGesture { app.select(ws) }
-            .contextMenu { workspaceMenu }
+            .background(WorkspaceMenuSurface(ws: ws, app: app))
 
             if expanded {
                 ForEach(ws.panes, id: \.id) { pane in
@@ -120,24 +120,123 @@ private struct WorkspaceRow: View {
         .padding(.bottom, 4)
     }
 
-    @ViewBuilder private var workspaceMenu: some View {
-        Button("New Terminal") { app.addTerminal(to: ws) }
-        Divider()
-        Button("Rename…") { app.rename(ws) }
-        Menu("Color") {
-            ForEach(BorderLabel.allCases.filter { $0 != .none }, id: \.self) { l in
-                Button {
-                    app.setColor(l.color!, for: ws)
-                } label: {
-                    Label { Text(l.title) } icon: { Image(nsImage: PaneView.swatch(l.color!, border: l.color!)) }
-                }
+}
+
+/// AppKit menus for the sidebar, built at click time so a row re-render
+/// (running programs change titles constantly) can't dismiss them.
+enum SidebarMenus {
+    static func workspace(for ws: Workspace, app: AppController) -> NSMenu {
+        let m = NSMenu()
+        m.autoenablesItems = false
+        m.addItem(item("New Terminal") { app.addTerminal(to: ws) })
+        m.addItem(.separator())
+        m.addItem(item("Rename…") { app.rename(ws) })
+        let colors = NSMenuItem(title: "Color", action: nil, keyEquivalent: "")
+        let cm = NSMenu()
+        for l in BorderLabel.allCases where l != .none {
+            let i = item(l.title) { app.setColor(l.color!, for: ws) }
+            i.image = PaneView.swatch(l.color!, border: l.color!)
+            i.state = ws.color.isClose(to: l.color!) ? .on : .off
+            cm.addItem(i)
+        }
+        colors.submenu = cm
+        m.addItem(colors)
+        m.addItem(.separator())
+        let up = item("Move Up") { app.move(ws, by: -1) }
+        up.isEnabled = app.workspaces.first !== ws
+        let down = item("Move Down") { app.move(ws, by: 1) }
+        down.isEnabled = app.workspaces.last !== ws
+        m.addItem(up)
+        m.addItem(down)
+        m.addItem(.separator())
+        m.addItem(item("Close Workspace") { app.closeWorkspace(ws) })
+        return m
+    }
+
+    static func pane(for pane: PaneView, app: AppController) -> NSMenu {
+        let m = NSMenu()
+        m.autoenablesItems = false
+        if pane.isHeld {
+            m.addItem(item("Restore Terminal") { pane.restore() })
+        } else {
+            m.addItem(item("Freeze Terminal…") { app.paneWantsFreeze(pane) })
+        }
+        m.addItem(.separator())
+        m.addItem(item("Rename…") { pane.menuRename() })
+        let colors = NSMenuItem(title: "Color Scheme", action: nil, keyEquivalent: "")
+        colors.submenu = PaneView.themeMenu(target: pane, action: #selector(PaneView.menuTheme(_:)),
+                                            current: pane.customBackground == nil ? pane.theme.id : nil)
+        m.addItem(colors)
+        let labels = NSMenuItem(title: "Border Label", action: nil, keyEquivalent: "")
+        labels.submenu = PaneView.labelMenu(target: pane, action: #selector(PaneView.menuLabel(_:)),
+                                            current: pane.borderLabel)
+        m.addItem(labels)
+        m.addItem(.separator())
+        m.addItem(item("Close Terminal") { app.paneWantsClose(pane) })
+        return m
+    }
+
+    private static func item(_ title: String, _ run: @escaping () -> Void) -> NSMenuItem {
+        ClosureMenuItem(title: title, handler: run)
+    }
+}
+
+extension NSColor {
+    /// Same color already applied (color pickers give slightly different components).
+    func isClose(to other: NSColor) -> Bool {
+        let a = usingColorSpace(.sRGB) ?? self
+        let b = other.usingColorSpace(.sRGB) ?? other
+        return abs(a.redComponent - b.redComponent) < 0.02
+            && abs(a.greenComponent - b.greenComponent) < 0.02
+            && abs(a.blueComponent - b.blueComponent) < 0.02
+    }
+}
+
+/// SwiftUI wrapper for a real AppKit context menu. SwiftUI's .contextMenu rebuilds the
+/// menu on every row re-render (running programs change titles constantly), which
+/// dismisses open submenus; NSMenu is built once at click time and lives its own life.
+/// Clicks pass through to SwiftUI except the right-click that opens the menu.
+struct MenuHandlingView: NSViewRepresentable {
+    var makeMenu: () -> NSMenu
+
+    func makeNSView(context: Context) -> NSView {
+        let v = MenuSurfaceView()
+        v.menuProvider = makeMenu
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? MenuSurfaceView)?.menuProvider = makeMenu
+    }
+
+    final class MenuSurfaceView: NSView {
+        var menuProvider: (() -> NSMenu)?
+
+        override func rightMouseDown(with event: NSEvent) {
+            guard let m = menuProvider?() else { return }
+            NSMenu.popUpContextMenu(m, with: event, for: self)
+        }
+
+        // Let everything else through to SwiftUI underneath.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
+/// Convenience wrappers for rows.
+struct WorkspaceMenuSurface: View {
+    let ws: Workspace
+    let app: AppController
+    var pane: PaneView?
+
+    var body: some View {
+        MenuHandlingView {
+            if let pane {
+                SidebarMenus.pane(for: pane, app: app)
+            } else {
+                SidebarMenus.workspace(for: ws, app: app)
             }
         }
-        Divider()
-        Button("Move Up") { app.move(ws, by: -1) }.disabled(index == 0)
-        Button("Move Down") { app.move(ws, by: 1) }.disabled(index == app.workspaces.count - 1)
-        Divider()
-        Button("Close Workspace") { app.closeWorkspace(ws) }
+        .allowsHitTesting(true)
     }
 }
 
@@ -191,31 +290,7 @@ private struct PaneRow: View {
         .contentShape(Rectangle())
         .onHover { hover = $0 }
         .onTapGesture { app.focus(pane) }
-        .contextMenu {
-            if pane.isHeld {
-                Button("Restore Terminal") { pane.restore() }
-            } else {
-                Button("Freeze Terminal…") { app.paneWantsFreeze(pane) }
-            }
-            Divider()
-            Button("Rename…") { pane.menuRename() }
-            Menu("Color Scheme") {
-                ForEach(TerminalTheme.all) { th in
-                    Button {
-                        pane.setTheme(th)
-                    } label: {
-                        Label { Text(th.name) } icon: { Image(nsImage: PaneView.swatch(th.background, border: th.foreground)) }
-                    }
-                }
-            }
-            Menu("Border Label") {
-                ForEach(BorderLabel.allCases, id: \.self) { l in
-                    Button(l.title) { pane.borderLabel = l }
-                }
-            }
-            Divider()
-            Button("Close Terminal") { app.paneWantsClose(pane) }
-        }
+        .background(WorkspaceMenuSurface(ws: ws, app: app, pane: pane))
     }
 }
 
