@@ -1,0 +1,24 @@
+# Build artifacts
+.build/
+build/
+
+# Xcode
+*.xcodeproj/
+xcuserdata/
+*.xcworkspace/
+
+# Swift Package Manager
+Packages/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# Local state, test scratch (never commit anything personal)
+*.termos
+state.json
+previous-session.json
+
+# Editors
+.idea/
+.vscode/
